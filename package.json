@@ -1,0 +1,22 @@
+{
+  "name": "keryx-arc-primitives",
+  "version": "0.1.0",
+  "description": "Reusable, forkable building blocks for agent + creator-monetization apps on Arc: two-toll x402 settlement, an on-chain creator/attribution registry, and non-custodial user-funded agent spend.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": ["arc", "circle", "x402", "usdc", "nanopayments", "agents", "creator-monetization", "arc-oss"],
+  "repository": { "type": "git", "url": "https://github.com/tang-vu/keryx-arc-primitives" },
+  "homepage": "https://keryx.cc",
+  "peerDependencies": {
+    "@circle-fin/x402-batching": "^2.0.4",
+    "viem": "^2.0.0"
+  },
+  "exports": {
+    "./arc": "./arc.ts",
+    "./x402-two-toll/seller": "./x402-two-toll/seller.ts",
+    "./x402-two-toll/buyer": "./x402-two-toll/buyer.ts",
+    "./source-registry/registry-client": "./source-registry/registry-client.ts",
+    "./source-registry/indexer": "./source-registry/indexer.ts",
+    "./browser-cosign/session-grant": "./browser-cosign/session-grant.ts"
+  }
+}
