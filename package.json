@@ -1,10 +1,10 @@
 {
   "name": "keryx-arc-primitives",
-  "version": "0.1.0",
-  "description": "Reusable, forkable building blocks for agent + creator-monetization apps on Arc: two-toll x402 settlement, an on-chain creator/attribution registry, and non-custodial user-funded agent spend.",
+  "version": "0.2.0",
+  "description": "Reusable, forkable building blocks for agent + creator-monetization apps on Arc: two-toll x402 settlement, an on-chain creator/attribution registry, non-custodial user-funded agent spend, gasless treasury-relayed cash-out, and x402 endpoint discovery.",
   "type": "module",
   "license": "MIT",
-  "keywords": ["arc", "circle", "x402", "usdc", "nanopayments", "agents", "creator-monetization", "arc-oss"],
+  "keywords": ["arc", "circle", "x402", "usdc", "nanopayments", "agents", "creator-monetization", "gasless-withdraw", "x402-discovery", "arc-oss"],
   "repository": { "type": "git", "url": "https://github.com/tang-vu/keryx-arc-primitives" },
   "homepage": "https://keryx.cc",
   "peerDependencies": {
@@ -17,6 +17,9 @@
     "./x402-two-toll/buyer": "./x402-two-toll/buyer.ts",
     "./source-registry/registry-client": "./source-registry/registry-client.ts",
     "./source-registry/indexer": "./source-registry/indexer.ts",
-    "./browser-cosign/session-grant": "./browser-cosign/session-grant.ts"
+    "./browser-cosign/session-grant": "./browser-cosign/session-grant.ts",
+    "./gasless-cashout/withdraw-intent": "./gasless-cashout/withdraw-intent.ts",
+    "./gasless-cashout/relay": "./gasless-cashout/relay.ts",
+    "./x402-discovery/discovery": "./x402-discovery/discovery.ts"
   }
 }

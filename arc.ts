@@ -11,7 +11,10 @@ export const ARC = {
   rpcUrl: "https://rpc.testnet.arc.network",
   usdc: "0x3600000000000000000000000000000000000000",     // ERC-20, 6 decimals
   gatewayWallet: "0x0077777d7EBA4688BDeF3E311b846F25870A19B9", // Circle Gateway batched-settlement contract
+  gatewayMinter: "0x0022222ABE238Cc2C7Bb1f21003F0a260052475B", // GatewayMinter — mints USDC on-chain from a Circle transfer attestation (gatewayMint())
   explorer: "https://testnet.arcscan.app",
+  gatewayTransferApi: "https://gateway-api-testnet.circle.com/v1/transfer", // POST a signed burn intent → mint attestation
+  gatewayWalletEip712: { name: "GatewayWallet", version: "1" }, // burn-intent EIP-712 domain (name+version only ⇒ no chainId, no gas, no network switch)
   gatewayBalanceApi: "https://gateway-api-testnet.circle.com/v1/balances",
   cctpDomain: 26,
   /**
