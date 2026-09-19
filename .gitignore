@@ -4,3 +4,9 @@ dist/
 .env
 .env.local
 .DS_Store
+
+# AI assistant artifacts
+.devin/
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+NUL
