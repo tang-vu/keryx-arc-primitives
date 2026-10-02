@@ -1,16 +1,6 @@
-/**
- * x402 discovery extension ("Bazaar" metadata) — make a paid endpoint self-describing so x402
- * tooling can find and call it with ZERO prior knowledge.
- *
- * The shape mirrors the entries Circle's x402 service registry returns from
- * `/v2/x402/discovery/resources` (the index behind `circle services search`): provider info +
- * input/output JSON schemas. You declare it once and:
- *   1. advertise it in your 402 challenge under `extensions.bazaar.info`, AND
- *   2. carry it through the facilitator verify/settle payload so the facilitator can catalog it.
- *
- * It is PURELY ADDITIVE metadata — it must never gate or break payment. `settleWithDiscoveryFallback`
- * enforces that: if a facilitator rejects the extended payload, it silently retries bare.
- */
+/** Bazaar provider/request/response metadata. Advertise on the challenge; facilitator
+ * compatibility and discovery publication are host-owned. This metadata never proves
+ * that an uncertain debit is safe to retry. */
 
 /** Loose declaration shape — provider + path + JSON schemas. Extend freely; tooling reads what it knows. */
 export interface DiscoveryDeclaration {
@@ -43,28 +33,33 @@ export interface DiscoveryDeclaration {
  *
  *   { x402Version: 2, accepts: [requirements], extensions: bazaarExtension(decl) }
  */
-export function bazaarExtension(discovery: DiscoveryDeclaration): { bazaar: { info: DiscoveryDeclaration } } {
+export function bazaarExtension(discovery: DiscoveryDeclaration): {
+  bazaar: { info: DiscoveryDeclaration };
+} {
   return { bazaar: { info: discovery } };
 }
 
 /** Merge the bazaar extension into an existing x402 challenge object (non-mutating). */
-export function withBazaarInfo<T extends { extensions?: Record<string, unknown> }>(
-  challenge: T,
-  discovery: DiscoveryDeclaration,
-): T {
-  return { ...challenge, extensions: { ...(challenge.extensions ?? {}), ...bazaarExtension(discovery) } };
+export function withBazaarInfo<
+  T extends { extensions?: Record<string, unknown> },
+>(challenge: T, discovery: DiscoveryDeclaration): T {
+  return {
+    ...challenge,
+    extensions: {
+      ...(challenge.extensions ?? {}),
+      ...bazaarExtension(discovery),
+    },
+  };
 }
 
-/**
- * Carry discovery metadata through a facilitator verify/settle call WITHOUT ever risking the money
- * path. Adds `extensions.bazaar.info` to the payload; if the facilitator rejects the extended
- * payload, retries once with the bare payload. Discovery is best-effort; settlement is not.
- *
- * @param payload   the x402 payment payload you'd normally pass to verify/settle
- * @param discovery the declaration to attach (skip attaching if payload already has extensions)
- * @param settleFn  your actual verify-or-settle call (e.g. facilitator.settle)
+/** Attach metadata once; never infer from a throw whether a debit occurred.
+ * This legacy name is retained for imports, but 0.3 deliberately removes fallback retry.
+ * Use discovery on the challenge or read-only verification if compatibility is uncertain.
  */
-export async function settleWithDiscoveryFallback<P extends { extensions?: unknown }, R>(
+export async function settleWithDiscoveryFallback<
+  P extends { extensions?: unknown },
+  R,
+>(
   payload: P,
   discovery: DiscoveryDeclaration | undefined,
   settleFn: (payload: P) => Promise<R>,
@@ -73,13 +68,5 @@ export async function settleWithDiscoveryFallback<P extends { extensions?: unkno
     discovery && !payload.extensions
       ? ({ ...payload, extensions: bazaarExtension(discovery) } as P)
       : payload;
-  try {
-    return await settleFn(extended);
-  } catch (err) {
-    if (extended !== payload) {
-      // Facilitator rejected the bazaar-extended payload — retry bare so payment still settles.
-      return await settleFn(payload);
-    }
-    throw err;
-  }
+  return settleFn(extended);
 }

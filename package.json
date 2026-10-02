@@ -1,25 +1,108 @@
 {
   "name": "keryx-arc-primitives",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Reusable, forkable building blocks for agent + creator-monetization apps on Arc: two-toll x402 settlement, an on-chain creator/attribution registry, non-custodial user-funded agent spend, gasless treasury-relayed cash-out, and x402 endpoint discovery.",
   "type": "module",
   "license": "MIT",
-  "keywords": ["arc", "circle", "x402", "usdc", "nanopayments", "agents", "creator-monetization", "gasless-withdraw", "x402-discovery", "arc-oss"],
-  "repository": { "type": "git", "url": "https://github.com/tang-vu/keryx-arc-primitives" },
+  "keywords": [
+    "arc",
+    "circle",
+    "x402",
+    "usdc",
+    "nanopayments",
+    "agents",
+    "creator-monetization",
+    "gasless-withdraw",
+    "x402-discovery",
+    "arc-oss"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tang-vu/keryx-arc-primitives"
+  },
   "homepage": "https://keryx.cc",
   "peerDependencies": {
-    "@circle-fin/x402-batching": "^2.0.4",
-    "viem": "^2.0.0"
+    "viem": "^2.47.1"
   },
   "exports": {
-    "./arc": "./arc.ts",
-    "./x402-two-toll/seller": "./x402-two-toll/seller.ts",
-    "./x402-two-toll/buyer": "./x402-two-toll/buyer.ts",
-    "./source-registry/registry-client": "./source-registry/registry-client.ts",
-    "./source-registry/indexer": "./source-registry/indexer.ts",
-    "./browser-cosign/session-grant": "./browser-cosign/session-grant.ts",
-    "./gasless-cashout/withdraw-intent": "./gasless-cashout/withdraw-intent.ts",
-    "./gasless-cashout/relay": "./gasless-cashout/relay.ts",
-    "./x402-discovery/discovery": "./x402-discovery/discovery.ts"
+    "./arc": {
+      "types": "./dist/arc.d.ts",
+      "import": "./dist/arc.js"
+    },
+    "./x402-two-toll/seller": {
+      "types": "./dist/x402-two-toll/seller.d.ts",
+      "import": "./dist/x402-two-toll/seller.js"
+    },
+    "./x402-two-toll/buyer": {
+      "types": "./dist/x402-two-toll/buyer.d.ts",
+      "import": "./dist/x402-two-toll/buyer.js"
+    },
+    "./source-registry/registry-client": {
+      "types": "./dist/source-registry/registry-client.d.ts",
+      "import": "./dist/source-registry/registry-client.js"
+    },
+    "./source-registry/indexer": {
+      "types": "./dist/source-registry/indexer.d.ts",
+      "import": "./dist/source-registry/indexer.js"
+    },
+    "./browser-cosign/session-grant": {
+      "types": "./dist/browser-cosign/session-grant.d.ts",
+      "import": "./dist/browser-cosign/session-grant.js"
+    },
+    "./gasless-cashout/withdraw-intent": {
+      "types": "./dist/gasless-cashout/withdraw-intent.d.ts",
+      "import": "./dist/gasless-cashout/withdraw-intent.js"
+    },
+    "./gasless-cashout/relay": {
+      "types": "./dist/gasless-cashout/relay.d.ts",
+      "import": "./dist/gasless-cashout/relay.js"
+    },
+    "./x402-discovery/discovery": {
+      "types": "./dist/x402-discovery/discovery.d.ts",
+      "import": "./dist/x402-discovery/discovery.js"
+    },
+    "./amounts": {
+      "types": "./dist/amounts.d.ts",
+      "import": "./dist/amounts.js"
+    }
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "packageManager": "npm@11.19.0",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "demo": "tsx examples/offline.ts",
+    "check": "npm run format:check && npm run typecheck && npm test && npm run build && npm run demo",
+    "prepack": "npm run build",
+    "format": "prettier --write \"**/*.{ts,mjs,json,md,yml}\"",
+    "format:check": "prettier --check \"**/*.{ts,mjs,json,md,yml}\"",
+    "test:package": "node scripts/check-package.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.0",
+    "prettier": "3.6.2",
+    "tsx": "4.21.0",
+    "typescript": "5.9.3",
+    "viem": "2.47.1",
+    "vitest": "4.1.9"
+  },
+  "files": [
+    "dist",
+    "source-registry/SourceRegistry.sol",
+    "README.md",
+    "CHANGELOG.md",
+    "docs",
+    "LICENSE"
+  ],
+  "allowScripts": {
+    "esbuild": true
+  },
+  "dependencies": {
+    "@circle-fin/x402-batching": "3.5.0",
+    "@x402/core": "2.23.0",
+    "@x402/evm": "2.23.0"
   }
 }

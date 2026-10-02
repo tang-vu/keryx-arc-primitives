@@ -1,60 +1,133 @@
-/**
- * session-grant — server-side spend-cap enforcement for non-custodial, user-funded agent spend.
- *
- * The pattern: a user funds a session EOA (their own wallet, in the browser tab), and the in-tab
- * session key co-signs each x402 authorization. This module is the SERVER half — it tracks how much
- * a session has spent and rejects a sign-request BEFORE the browser is ever asked to sign once the
- * cap is reached. The private key never touches the server; the funded cap is the hard ceiling.
- *
- * In-memory by default (swap the Map for Redis/DB to scale horizontally). Grants expire after a TTL
- * so a leaked session key can only ever spend up to the remaining cap, within the window.
+/** SINGLE-PROCESS reference only. Restart loses authority: never use this store for live funds.
+ * Production requires a transactional durable store across all signer aliases/epochs.
+ * TTL/revocation stops admission, never erases consumed or exposed reservations.
  */
 export interface Grant {
-  sessionId: string;     // lowercased session identifier (e.g. derived from the user's wallet sig)
-  capUsdc: number;       // hard spend ceiling = the amount the user funded
-  spentUsdc: number;     // monotonically increasing
-  expiresAt: number;     // epoch ms
+  readonly sessionId: string;
+  readonly signer: string;
+  readonly capMicros: bigint;
+  readonly expiresAt: number;
+  readonly revoked: boolean;
 }
-
-const grants = new Map<string, Grant>();
-
-/** Register/replace a grant for a session. Call when the user funds + activates a session. */
-export function setGrant(sessionId: string, capUsdc: number, ttlSeconds = 3600): Grant {
-  const g: Grant = { sessionId: sessionId.toLowerCase(), capUsdc, spentUsdc: 0, expiresAt: Date.now() + ttlSeconds * 1000 };
-  grants.set(g.sessionId, g);
-  return g;
+export interface Reservation {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly amountMicros: bigint;
+  readonly state:
+    | "prepared"
+    | "exposed"
+    | "submitted"
+    | "settled"
+    | "cancelled";
 }
-
-export function getGrant(sessionId: string): Grant | undefined {
-  return grants.get(sessionId.toLowerCase());
-}
-
-export function isGrantValid(sessionId: string): boolean {
-  const g = grants.get(sessionId.toLowerCase());
-  return !!g && Date.now() < g.expiresAt && g.spentUsdc < g.capUsdc;
-}
-
-/**
- * Pre-spend check — call BEFORE asking the browser to sign. Returns true only if `amountUsdc`
- * still fits under the cap. This is the guard that makes the funded amount a hard ceiling.
- */
-export function canSpend(sessionId: string, amountUsdc: number): boolean {
-  const g = grants.get(sessionId.toLowerCase());
-  if (!g || Date.now() >= g.expiresAt) return false;
-  return g.spentUsdc + amountUsdc <= g.capUsdc + 1e-9;
-}
-
-/** Record a settled spend. Call AFTER a successful settle so the running total stays accurate. */
-export function recordSpend(sessionId: string, amountUsdc: number): void {
-  const g = grants.get(sessionId.toLowerCase());
-  if (g) g.spentUsdc += amountUsdc;
-}
-
-export function revokeGrant(sessionId: string): void {
-  grants.delete(sessionId.toLowerCase());
-}
-
-export function remaining(sessionId: string): number {
-  const g = grants.get(sessionId.toLowerCase());
-  return g ? Math.max(0, g.capUsdc - g.spentUsdc) : 0;
+export class MemoryGrantStore {
+  private grants = new Map<string, Grant>();
+  private reservations = new Map<string, Reservation>();
+  constructor(private readonly now: () => number = Date.now) {}
+  setGrant(
+    sessionId: string,
+    signer: string,
+    capMicros: bigint,
+    ttlSeconds = 3600,
+  ): Grant {
+    if (
+      !sessionId ||
+      !/^0x[0-9a-fA-F]{40}$/.test(signer) ||
+      /^0x0{40}$/.test(signer) ||
+      typeof capMicros !== "bigint" ||
+      capMicros <= 0n ||
+      !Number.isSafeInteger(ttlSeconds) ||
+      ttlSeconds <= 0
+    )
+      throw new Error("invalid grant");
+    const id = sessionId.toLowerCase();
+    // A funded signer cannot gain fresh capacity via grant replacement or an alias.
+    if (
+      this.grants.has(id) ||
+      [...this.grants.values()].some((g) => g.signer === signer.toLowerCase())
+    )
+      throw new Error("grant or signer already admitted");
+    const expiresAt = this.now() + ttlSeconds * 1000;
+    if (!Number.isSafeInteger(expiresAt)) throw new Error("invalid expiry");
+    const grant = Object.freeze({
+      sessionId: id,
+      signer: signer.toLowerCase(),
+      capMicros,
+      expiresAt,
+      revoked: false,
+    });
+    this.grants.set(id, grant);
+    return grant;
+  }
+  getGrant(sessionId: string): Grant | undefined {
+    return this.grants.get(sessionId.toLowerCase());
+  }
+  remaining(sessionId: string): bigint {
+    const id = sessionId.toLowerCase(),
+      grant = this.grants.get(id);
+    if (!grant) return 0n;
+    const held = [...this.reservations.values()]
+      .filter((r) => r.sessionId === id && r.state !== "cancelled")
+      .reduce((a, r) => a + r.amountMicros, 0n);
+    return grant.capMicros - held;
+  }
+  /** Synchronous check + reserve, before ANY await or nonce/signature exposure.
+   * id must be the host's unique admitted payment intent, never a caller replacement nonce. */
+  reserve(sessionId: string, id: string, amountMicros: bigint): Reservation {
+    const key = sessionId.toLowerCase(),
+      grant = this.grants.get(key);
+    if (
+      !grant ||
+      grant.revoked ||
+      this.now() >= grant.expiresAt ||
+      !id ||
+      typeof amountMicros !== "bigint" ||
+      amountMicros <= 0n ||
+      this.reservations.has(id) ||
+      amountMicros > this.remaining(key)
+    )
+      throw new Error("reservation denied");
+    const reservation = Object.freeze({
+      id,
+      sessionId: key,
+      amountMicros,
+      state: "prepared" as const,
+    });
+    this.reservations.set(id, reservation);
+    return reservation;
+  }
+  getReservation(id: string): Reservation | undefined {
+    return this.reservations.get(id);
+  }
+  private transition(
+    id: string,
+    from: Reservation["state"],
+    state: Reservation["state"],
+  ): Reservation {
+    const r = this.reservations.get(id);
+    if (!r || r.state !== from)
+      throw new Error("invalid reservation transition");
+    const next = Object.freeze({ ...r, state });
+    this.reservations.set(id, next);
+    return next;
+  }
+  expose(id: string): Reservation {
+    return this.transition(id, "prepared", "exposed");
+  }
+  submit(id: string): Reservation {
+    return this.transition(id, "exposed", "submitted");
+  }
+  /** Bookkeeping only: caller must first persist exact, validated Circle success evidence. */
+  settle(id: string): Reservation {
+    return this.transition(id, "submitted", "settled");
+  }
+  /** Only proven unexposed work may release. No exposed timeout/failure release API. */
+  cancelUnexposed(id: string): Reservation {
+    return this.transition(id, "prepared", "cancelled");
+  }
+  revokeGrant(sessionId: string): void {
+    const id = sessionId.toLowerCase(),
+      g = this.grants.get(id);
+    if (g) this.grants.set(id, Object.freeze({ ...g, revoked: true }));
+  }
 }

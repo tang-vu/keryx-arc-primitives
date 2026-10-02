@@ -6,29 +6,46 @@
  * and where to checkpoint `fromBlock`. Returns the next block to resume from.
  *
  * Why poll instead of subscribe: works over plain HTTP RPC (no websocket needed), and chunked
- * backfill from the deploy block is restart-safe — checkpoint the returned block and you never
- * miss or double-process a log.
+ * backfill from the deploy block is restart-safe — checkpoint only after every callback succeeds. Delivery is at-least-once;
+ * callbacks must deduplicate by transactionHash + logIndex, including partial failures.
  */
-import { createPublicClient, http, parseAbiItem, type Address, type Hex } from "viem";
+import {
+  createPublicClient,
+  http,
+  parseAbiItem,
+  type Address,
+  type Hex,
+} from "viem";
 import { arcTestnet } from "viem/chains";
 import { ARC } from "../arc.js";
 
-export type RegistryEvent =
-  | { type: "registered"; id: Hex; creator: Address; contentCid: string; block: bigint }
+export type RegistryEvent = { transactionHash: Hex; logIndex: number } & (
+  | {
+      type: "registered";
+      id: Hex;
+      creator: Address;
+      contentCid: string;
+      block: bigint;
+    }
   | { type: "updated"; id: Hex; updater: Address; block: bigint }
-  | { type: "deactivated"; id: Hex; block: bigint };
+  | { type: "deactivated"; id: Hex; block: bigint }
+);
 
 const EVENTS = {
-  registered: parseAbiItem("event SourceRegistered(bytes32 indexed id, address indexed creator, string contentCid)"),
-  updated: parseAbiItem("event SourceUpdated(bytes32 indexed id, address indexed updater)"),
+  registered: parseAbiItem(
+    "event SourceRegistered(bytes32 indexed id, address indexed creator, string contentCid)",
+  ),
+  updated: parseAbiItem(
+    "event SourceUpdated(bytes32 indexed id, address indexed updater)",
+  ),
   deactivated: parseAbiItem("event SourceDeactivated(bytes32 indexed id)"),
 } as const;
 
 export interface IndexerOptions {
-  address: Address;        // deployed SourceRegistry
-  fromBlock: bigint;       // last processed block + 1 (or the deploy block on cold start)
+  address: Address; // deployed SourceRegistry
+  fromBlock: bigint; // last processed block + 1 (or the deploy block on cold start)
   rpcUrl?: string;
-  chunk?: bigint;          // blocks per getLogs call (default 500 — Arc-friendly)
+  chunk?: bigint; // blocks per getLogs call (default 500 — Arc-friendly)
   onEvent: (e: RegistryEvent) => Promise<void> | void;
 }
 
@@ -38,24 +55,80 @@ export interface IndexerOptions {
  * retry the same chunk without advancing the checkpoint past unprocessed logs.
  */
 export async function syncOnce(o: IndexerOptions): Promise<bigint> {
-  const client = createPublicClient({ chain: arcTestnet, transport: http(o.rpcUrl ?? ARC.rpcUrl) });
+  const client = createPublicClient({
+    chain: arcTestnet,
+    transport: http(o.rpcUrl ?? ARC.rpcUrl),
+  });
   const chunk = o.chunk ?? 500n;
+  if (chunk <= 0n || o.fromBlock < 0n)
+    throw new Error("positive chunk and non-negative cursor required");
+  if ((await client.getChainId()) !== ARC.chainId)
+    throw new Error("RPC is not Arc testnet");
   const head = await client.getBlockNumber();
   let from = o.fromBlock;
 
   while (from <= head) {
     const to = from + chunk - 1n > head ? head : from + chunk - 1n;
     const [reg, upd, deact] = await Promise.all([
-      client.getLogs({ address: o.address, event: EVENTS.registered, fromBlock: from, toBlock: to }),
-      client.getLogs({ address: o.address, event: EVENTS.updated, fromBlock: from, toBlock: to }),
-      client.getLogs({ address: o.address, event: EVENTS.deactivated, fromBlock: from, toBlock: to }),
+      client.getLogs({
+        address: o.address,
+        event: EVENTS.registered,
+        fromBlock: from,
+        toBlock: to,
+      }),
+      client.getLogs({
+        address: o.address,
+        event: EVENTS.updated,
+        fromBlock: from,
+        toBlock: to,
+      }),
+      client.getLogs({
+        address: o.address,
+        event: EVENTS.deactivated,
+        fromBlock: from,
+        toBlock: to,
+      }),
     ]);
 
     const events: RegistryEvent[] = [
-      ...reg.map((l) => ({ type: "registered" as const, id: l.args.id!, creator: l.args.creator!, contentCid: l.args.contentCid ?? "", block: l.blockNumber! })),
-      ...upd.map((l) => ({ type: "updated" as const, id: l.args.id!, updater: l.args.updater!, block: l.blockNumber! })),
-      ...deact.map((l) => ({ type: "deactivated" as const, id: l.args.id!, block: l.blockNumber! })),
-    ].sort((a, b) => Number(a.block - b.block));
+      ...reg.map((l) => ({
+        type: "registered" as const,
+        id: l.args.id!,
+        creator: l.args.creator!,
+        contentCid: l.args.contentCid ?? "",
+        block: l.blockNumber!,
+        transactionHash: l.transactionHash!,
+        logIndex: l.logIndex!,
+      })),
+      ...upd.map((l) => ({
+        type: "updated" as const,
+        id: l.args.id!,
+        updater: l.args.updater!,
+        block: l.blockNumber!,
+        transactionHash: l.transactionHash!,
+        logIndex: l.logIndex!,
+      })),
+      ...deact.map((l) => ({
+        type: "deactivated" as const,
+        id: l.args.id!,
+        block: l.blockNumber!,
+        transactionHash: l.transactionHash!,
+        logIndex: l.logIndex!,
+      })),
+    ].sort((a, b) =>
+      a.block === b.block
+        ? a.logIndex - b.logIndex
+        : a.block < b.block
+          ? -1
+          : 1,
+    );
+    if (
+      events.some(
+        (e) =>
+          !e.transactionHash || e.logIndex == null || e.block == null || !e.id,
+      )
+    )
+      throw new Error("incomplete registry log");
 
     for (const e of events) await o.onEvent(e);
     from = to + 1n;

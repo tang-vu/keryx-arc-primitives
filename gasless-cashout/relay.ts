@@ -1,32 +1,25 @@
-/**
- * Server-side relay for a gasless creator/user cash-out on Arc.
- *
- * The user signs a burn intent in the browser (see `withdraw-intent.ts`). This relay:
- *   1. POSTs the signed intent to Circle's Gateway /transfer API → gets a mint attestation.
- *   2. Has a TREASURY wallet submit the on-chain gatewayMint(), paying the gas — so the user pays none.
- *
- * Non-custodial + safe to expose: the burn-intent signature can only be produced by the balance
- * owner, and destinationCaller = 0x0 makes the mint permissionless, so the treasury (any sender)
- * can submit it. It can only ever move the SIGNER's own funds to the recipient the SIGNER chose.
- *
- * Framework-agnostic: no request/DB coupling. Wrap `relayGaslessWithdraw` in your route handler,
- * pass the treasury key, and (recommended) assert `expectedDepositor` = the authenticated user.
- */
-
 import {
-  createWalletClient,
   createPublicClient,
+  createWalletClient,
   http,
-  getAddress,
+  encodeFunctionData,
+  encodePacked,
+  concatHex,
+  sliceHex,
+  size,
+  keccak256,
   type Hex,
 } from "viem";
 import { arcTestnet } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
-import { ARC } from "../arc";
-import type { WireBurnIntent } from "./withdraw-intent";
+import { ARC } from "../arc.js";
+import {
+  verifyWithdrawIntent,
+  type SignedWithdrawIntent,
+  type WithdrawPolicy,
+} from "./withdraw-intent.js";
 
-/** gatewayMint(bytes attestationPayload, bytes signature) — from the SDK's GATEWAY_MINTER_ABI. */
-const GATEWAY_MINTER_ABI = [
+const ABI = [
   {
     name: "gatewayMint",
     type: "function",
@@ -38,122 +31,272 @@ const GATEWAY_MINTER_ABI = [
     outputs: [],
   },
 ] as const;
-
-export interface RelayOpts {
-  /** Treasury private key that pays gas to submit the mint. Keep server-side only. */
-  treasuryKey: Hex;
-  /** Signed burn intent from the browser. */
-  burnIntent: WireBurnIntent;
+export type VerifiedWithdraw = Awaited<ReturnType<typeof verifyWithdrawIntent>>;
+export interface MintAttestation {
+  transferId: string;
+  attestation: Hex;
   signature: Hex;
-  /**
-   * REQUIRED for safety: the address you expect to own the funds (e.g. your authenticated session
-   * wallet). The relay rejects any intent whose depositor/signer isn't this address, so callers
-   * can't spend the treasury relay to mint against balances they don't own.
-   */
-  expectedDepositor: string;
-  /** Override the RPC (defaults to Arc testnet). */
+  expirationBlock: string;
+}
+export interface RelayJournal {
+  /** Atomic durable unique claim by BurnIntent digest AND TransferSpec hash/salt.
+   * Persist request + authenticated policy; otherwise changed maxFee/height reuses the spec. */
+  claim(
+    verified: VerifiedWithdraw,
+    transferSpecHash: Hex,
+    policy: WithdrawPolicy & { maxGasCostAtomic: bigint },
+  ): Promise<boolean>;
+  submitted(id: Hex): Promise<void>;
+  attested(id: Hex, attestation: MintAttestation): Promise<void>;
+  /** Persist signed raw transaction and its hash BEFORE broadcasting. Recovery uses this exact
+   * transaction or on-chain observations; never fresh treasury nonce/intent automatically. */
+  mintPrepared(id: Hex, rawTransaction: Hex, hash: Hex): Promise<void>;
+  confirmed(id: Hex, hash: Hex): Promise<void>;
+}
+export interface RelayOpts extends SignedWithdrawIntent {
+  treasuryKey: Hex;
+  policy: WithdrawPolicy;
+  journal: RelayJournal;
+  /** Host-reviewed treasury gas ceiling, 18-decimal native Arc units. */
+  maxGasCostAtomic: bigint;
   rpcUrl?: string;
-  /** Mint receipt timeout in ms (default 90s). */
   timeoutMs?: number;
 }
-
 export interface RelayResult {
+  id: Hex;
   mintTxHash: Hex;
-  amountUsdc: number;
+  amountMicros: string;
   recipient: string;
   explorerUrl: string;
 }
-
-/** Decode a left-padded bytes32 back to a checksummed address (rightmost 20 bytes). */
-function b32ToAddress(b32: string): string {
-  return getAddress(("0x" + b32.slice(-40)) as Hex);
+function encodeSpec(v: VerifiedWithdraw): Hex {
+  const s = v.request.burnIntent.spec;
+  return concatHex([
+    encodePacked(
+      ["bytes4", "uint32", "uint32", "uint32"],
+      ["0xca85def7", s.version, s.sourceDomain, s.destinationDomain],
+    ),
+    s.sourceContract,
+    s.destinationContract,
+    s.sourceToken,
+    s.destinationToken,
+    s.sourceDepositor,
+    s.destinationRecipient,
+    s.sourceSigner,
+    s.destinationCaller,
+    encodePacked(
+      ["uint256", "bytes32", "uint32"],
+      [BigInt(s.value), s.salt, 0],
+    ),
+  ]);
 }
-
-/**
- * Validate a signed burn intent against the expected owner + the canonical Arc contracts, then
- * relay it to Circle and submit the mint from the treasury. Throws a `RelayError` (with `.status`)
- * on any rejection so a route handler can map it to an HTTP code.
- */
-export async function relayGaslessWithdraw(opts: RelayOpts): Promise<RelayResult> {
-  const { burnIntent, signature, expectedDepositor, treasuryKey } = opts;
-  const spec = burnIntent?.spec;
-  if (!spec || !signature) throw new RelayError("missing burnIntent or signature", 400);
-
-  let depositor: string, signer: string, recipient: string;
-  try {
-    depositor = b32ToAddress(spec.sourceDepositor);
-    signer = b32ToAddress(spec.sourceSigner);
-    recipient = b32ToAddress(spec.destinationRecipient);
-  } catch {
-    throw new RelayError("malformed intent addresses", 400);
-  }
-
-  // The intent must be for the expected owner's own balance (correct attribution + no free use of
-  // the treasury relay by non-owners).
+/** Structure + exact request binding, not proof of mint. Contract simulation authenticates it. */
+export function matchMintAttestation(
+  verified: VerifiedWithdraw,
+  value: unknown,
+): MintAttestation {
+  const r = value as MintAttestation & { success?: boolean; error?: unknown };
   if (
-    depositor.toLowerCase() !== expectedDepositor.toLowerCase() ||
-    signer.toLowerCase() !== depositor.toLowerCase()
-  ) {
-    throw new RelayError("intent depositor does not match expected owner", 403);
+    !r ||
+    typeof r !== "object" ||
+    (r.success !== undefined && r.success !== true) ||
+    typeof r.transferId !== "string" ||
+    typeof r.attestation !== "string" ||
+    typeof r.signature !== "string" ||
+    typeof r.expirationBlock !== "string" ||
+    r.error ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      r.transferId,
+    ) ||
+    !/^0x(?:[0-9a-fA-F]{2})+$/.test(r.attestation) ||
+    !/^0x[0-9a-fA-F]{130}$/.test(r.signature) ||
+    !/^[1-9][0-9]{0,77}$/.test(r.expirationBlock)
+  )
+    throw new Error("invalid mint attestation");
+  let payload = r.attestation.toLowerCase() as Hex;
+  if (sliceHex(payload, 0, 4) === "0x1e12db71") {
+    if (size(payload) !== 388 || sliceHex(payload, 4, 8) !== "0x00000001")
+      throw new Error("unexpected attestation set");
+    payload = sliceHex(payload, 8);
   }
-
-  // Same-chain Arc → Arc only, against the canonical Gateway contracts + USDC.
-  const okChain =
-    spec.sourceDomain === ARC.cctpDomain &&
-    spec.destinationDomain === ARC.cctpDomain &&
-    b32ToAddress(spec.sourceContract).toLowerCase() === ARC.gatewayWallet.toLowerCase() &&
-    b32ToAddress(spec.destinationContract).toLowerCase() === ARC.gatewayMinter.toLowerCase() &&
-    b32ToAddress(spec.sourceToken).toLowerCase() === ARC.usdc.toLowerCase() &&
-    b32ToAddress(spec.destinationToken).toLowerCase() === ARC.usdc.toLowerCase();
-  if (!okChain) throw new RelayError("intent targets an unexpected chain/contract", 400);
-
-  const valueAtomic = BigInt(spec.value);
-  if (valueAtomic <= 0n) throw new RelayError("withdraw amount must be > 0", 400);
-  const amountUsdc = Number(valueAtomic) / 1e6;
-  const rpcUrl = opts.rpcUrl ?? ARC.rpcUrl;
-
-  // 1) Relay the signed burn intent to Circle → mint attestation.
-  const transferRes = await fetch(ARC.gatewayTransferApi, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify([{ burnIntent, signature }]),
-  });
-  const result = (await transferRes.json().catch(() => ({}))) as {
-    success?: boolean;
-    error?: string;
-    message?: string;
-    attestation?: Hex;
-    signature?: Hex;
+  if (
+    size(payload) !== 380 ||
+    sliceHex(payload, 0, 4) !== "0xff6fb334" ||
+    BigInt(sliceHex(payload, 4, 36)).toString() !== r.expirationBlock ||
+    sliceHex(payload, 36, 40) !== "0x00000154" ||
+    sliceHex(payload, 40) !== encodeSpec(verified).toLowerCase()
+  )
+    throw new Error("attestation does not match withdrawal");
+  return {
+    transferId: r.transferId,
+    attestation: r.attestation,
+    signature: r.signature,
+    expirationBlock: r.expirationBlock,
   };
-  if (result.success === false || result.error || !result.attestation || !result.signature) {
-    const reason = result.message || result.error || `HTTP ${transferRes.status}`;
-    throw new RelayError(`gateway transfer failed: ${reason}`, 502);
-  }
-
-  // 2) Treasury submits the on-chain mint (pays gas). destinationCaller = 0x0 ⇒ permissionless.
-  const treasury = privateKeyToAccount(treasuryKey);
-  const walletClient = createWalletClient({ account: treasury, chain: arcTestnet, transport: http(rpcUrl) });
-  const publicClient = createPublicClient({ chain: arcTestnet, transport: http(rpcUrl) });
-
-  const mintTxHash = await walletClient.writeContract({
-    address: ARC.gatewayMinter as Hex,
-    abi: GATEWAY_MINTER_ABI,
-    functionName: "gatewayMint",
-    args: [result.attestation, result.signature],
-  });
-  const receipt = await publicClient.waitForTransactionReceipt({
-    hash: mintTxHash,
-    timeout: opts.timeoutMs ?? 90_000,
-  });
-  if (receipt.status !== "success") throw new RelayError("mint reverted on-chain", 502);
-
-  // Unlike per-payment Circle settlement UUIDs, THIS is a real EVM tx hash that resolves at /tx/.
-  return { mintTxHash, amountUsdc, recipient, explorerUrl: `${ARC.explorer}/tx/${mintTxHash}` };
 }
-
-/** Error carrying an HTTP status so a route handler can `return Response.json({error}, {status})`. */
+/** No implicit retry. Host must authenticate policy, serialize treasury nonce use, rate-limit
+ * sponsorship and provide transactional durable storage. Ambiguous transfer/mint stays held.
+ */
+export async function relayGaslessWithdraw(
+  opts: RelayOpts,
+): Promise<RelayResult> {
+  const selected = { ...opts, policy: { ...opts.policy } };
+  if (
+    !selected.journal ||
+    typeof selected.maxGasCostAtomic !== "bigint" ||
+    selected.maxGasCostAtomic <= 0n
+  )
+    throw new RelayError(
+      "durable relay journal and gas cap required",
+      400,
+      "unsubmitted",
+    );
+  let verified: VerifiedWithdraw;
+  try {
+    verified = await verifyWithdrawIntent(
+      { burnIntent: selected.burnIntent, signature: selected.signature },
+      selected.policy,
+    );
+  } catch {
+    throw new RelayError("invalid signed withdrawal", 400, "unsubmitted");
+  }
+  const journal = selected.journal,
+    account = privateKeyToAccount(selected.treasuryKey);
+  const publicClient = createPublicClient({
+    chain: arcTestnet,
+    transport: http(selected.rpcUrl ?? ARC.rpcUrl, { retryCount: 0 }),
+  });
+  const wallet = createWalletClient({
+    chain: arcTestnet,
+    account,
+    transport: http(selected.rpcUrl ?? ARC.rpcUrl, { retryCount: 0 }),
+  });
+  if ((await publicClient.getChainId()) !== ARC.chainId)
+    throw new RelayError(
+      "RPC is not Arc testnet",
+      400,
+      "unsubmitted",
+      verified.id,
+    );
+  if (
+    (await publicClient.getBlockNumber()) >=
+    BigInt(verified.request.burnIntent.maxBlockHeight)
+  )
+    throw new RelayError(
+      "burn intent expired before submission",
+      400,
+      "unsubmitted",
+      verified.id,
+    );
+  try {
+    if (
+      (await journal.claim(
+        structuredClone(verified),
+        keccak256(encodeSpec(verified)),
+        { ...selected.policy, maxGasCostAtomic: selected.maxGasCostAtomic },
+      )) !== true
+    )
+      throw new RelayError(
+        "withdrawal already claimed; recover original",
+        409,
+        "retained",
+        verified.id,
+      );
+    await journal.submitted(verified.id);
+  } catch (error) {
+    if (error instanceof RelayError) throw error;
+    throw new RelayError(
+      "admission acknowledgement unavailable; recover original",
+      503,
+      "retained",
+      verified.id,
+    );
+  }
+  let hash: Hex | undefined;
+  try {
+    const response = await fetch(ARC.gatewayTransferApi, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify([verified.request]),
+      redirect: "error",
+      signal: AbortSignal.timeout(selected.timeoutMs ?? 90_000),
+    });
+    if (!response.ok) throw new Error("transfer response unavailable");
+    const attestation = matchMintAttestation(verified, await response.json());
+    await journal.attested(verified.id, structuredClone(attestation));
+    if (
+      (await publicClient.getBlockNumber()) >=
+      BigInt(attestation.expirationBlock)
+    )
+      throw new Error("attestation expired; recovery required");
+    await publicClient.simulateContract({
+      account,
+      address: ARC.gatewayMinter,
+      abi: ABI,
+      functionName: "gatewayMint",
+      args: [attestation.attestation, attestation.signature],
+    });
+    const tx = await wallet.prepareTransactionRequest({
+      account,
+      to: ARC.gatewayMinter,
+      data: encodeFunctionData({
+        abi: ABI,
+        functionName: "gatewayMint",
+        args: [attestation.attestation, attestation.signature],
+      }),
+    });
+    const unitPrice = tx.maxFeePerGas ?? tx.gasPrice;
+    if (
+      tx.chainId !== ARC.chainId ||
+      !tx.gas ||
+      !unitPrice ||
+      tx.gas * unitPrice > selected.maxGasCostAtomic
+    )
+      throw new Error("treasury gas cap exceeded");
+    const raw = await wallet.signTransaction(tx);
+    hash = keccak256(raw);
+    await journal.mintPrepared(verified.id, raw, hash);
+    const sent = await publicClient.sendRawTransaction({
+      serializedTransaction: raw,
+    });
+    if (sent !== hash) throw new Error("broadcast identity mismatch");
+    const receipt = await publicClient.waitForTransactionReceipt({
+      hash,
+      timeout: selected.timeoutMs ?? 90_000,
+    });
+    if (
+      receipt.status !== "success" ||
+      receipt.transactionHash.toLowerCase() !== hash.toLowerCase() ||
+      receipt.to?.toLowerCase() !== ARC.gatewayMinter.toLowerCase() ||
+      receipt.from.toLowerCase() !== account.address.toLowerCase()
+    )
+      throw new Error("mint not confirmed successful");
+    await journal.confirmed(verified.id, hash);
+    return {
+      id: verified.id,
+      mintTxHash: hash,
+      amountMicros: verified.amountMicros,
+      recipient: verified.recipient,
+      explorerUrl: `${ARC.explorer}/tx/${hash}`,
+    };
+  } catch {
+    throw new RelayError(
+      "withdrawal outcome retained; recover original request/transaction",
+      202,
+      "pending",
+      verified.id,
+      hash,
+    );
+  }
+}
 export class RelayError extends Error {
-  constructor(message: string, public status: number) {
+  constructor(
+    message: string,
+    public status: number,
+    public state: "unsubmitted" | "retained" | "pending",
+    public id?: Hex,
+    public mintTxHash?: Hex,
+  ) {
     super(message);
     this.name = "RelayError";
   }
