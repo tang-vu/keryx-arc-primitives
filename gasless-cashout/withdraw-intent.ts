@@ -16,11 +16,21 @@
  * Runs in the browser: needs a connected WalletClient + crypto.getRandomValues.
  */
 
-import { pad, getAddress, parseUnits, maxUint256, zeroAddress, type WalletClient, type Hex } from "viem";
-import { ARC } from "../arc";
+import {
+  pad,
+  getAddress,
+  maxUint256,
+  zeroAddress,
+  hashTypedData,
+  recoverTypedDataAddress,
+  type WalletClient,
+  type Hex,
+} from "viem";
+import { ARC } from "../arc.js";
+import { parseUsdc } from "../amounts.js";
 
 /** TransferSpec + BurnIntent EIP-712 types, verbatim from the SDK. Do not reorder — the hash depends on it. */
-const BURN_INTENT_TYPES = {
+export const BURN_INTENT_TYPES = {
   TransferSpec: [
     { name: "version", type: "uint32" },
     { name: "sourceDomain", type: "uint32" },
@@ -74,8 +84,10 @@ export interface SignedWithdrawIntent {
 export interface WithdrawIntentOpts {
   /** Address to receive the minted USDC. Defaults to the signer's own address. */
   recipient?: string;
-  /** USDC ceiling for Circle's withdraw fee (charged ON TOP of value). Default 2.01. */
-  maxFeeUsdc?: number;
+  /** USDC ceiling for Circle's withdraw fee (charged ON TOP of value). Must be explicitly quoted/reserved by the host; there is no assumed fee. */
+  maxFeeUsdc: string;
+  /** Finite source-chain height selected from a current trusted head and signing policy. */
+  maxBlockHeight: bigint;
 }
 
 /** Address → left-padded bytes32 (matches the SDK's addressToBytes32). */
@@ -87,7 +99,10 @@ function toBytes32(addr: string): Hex {
 function randomSalt(): Hex {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
-  return ("0x" + Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("")) as Hex;
+  return ("0x" +
+    Array.from(bytes)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("")) as Hex;
 }
 
 /**
@@ -97,7 +112,7 @@ function randomSalt(): Hex {
  *
  * NOTE ON FULL-BALANCE WITHDRAWALS: Circle requires `available >= value + fee`, so a withdraw for the
  * ENTIRE available balance fails by exactly the fee. Reserve a fee margin from the amount before
- * calling this (e.g. value = availableAtomic - parseUnits("0.005", 6)). See README.
+ * calling this (value = availableAtomic - quotedMaxFeeAtomic). See README.
  *
  * @param walletClient - the connected wallet (e.g. wagmi useWalletClient)
  * @param valueAtomic  - amount to withdraw in atomic USDC units (6 decimals)
@@ -105,16 +120,26 @@ function randomSalt(): Hex {
 export async function buildAndSignWithdrawIntent(
   walletClient: WalletClient,
   valueAtomic: bigint,
-  opts: WithdrawIntentOpts = {},
+  opts: WithdrawIntentOpts,
 ): Promise<SignedWithdrawIntent> {
   const account = walletClient.account;
   if (!account) throw new Error("wallet has no account");
   const from = getAddress(account.address);
   const to = getAddress(opts.recipient ?? account.address);
-  if (valueAtomic <= 0n) throw new Error("withdraw amount must be > 0");
+  if (typeof valueAtomic !== "bigint" || valueAtomic <= 0n)
+    throw new Error("withdraw amount must be > 0");
 
   const domain = ARC.cctpDomain; // same source + destination domain (Arc → Arc)
-  const maxFee = parseUnits((opts.maxFeeUsdc ?? 2.01).toFixed(6), 6);
+  const maxFee = parseUsdc(opts.maxFeeUsdc);
+  if (maxFee > maxUint256 || valueAtomic > maxUint256)
+    throw new Error("uint256 overflow");
+  const maxBlockHeight = opts.maxBlockHeight;
+  if (
+    typeof maxBlockHeight !== "bigint" ||
+    maxBlockHeight <= 0n ||
+    maxBlockHeight >= maxUint256
+  )
+    throw new Error("finite block-height ceiling required");
   const salt = randomSalt();
 
   // Bigint form used for the EIP-712 hash (matches GatewayClient.createBurnIntent exactly).
@@ -134,7 +159,7 @@ export async function buildAndSignWithdrawIntent(
     salt,
     hookData: "0x" as Hex,
   };
-  const message = { maxBlockHeight: maxUint256, maxFee, spec };
+  const message = { maxBlockHeight, maxFee, spec };
 
   // domain = { name, version } only (no chainId) → chain-agnostic signature, no gas, no network switch.
   const signature = await walletClient.signTypedData({
@@ -148,9 +173,131 @@ export async function buildAndSignWithdrawIntent(
   // Serialise bigints → strings for JSON transport. Equal numeric values ⇒ Circle reconstructs the
   // same EIP-712 digest, so the signature still verifies (the SDK posts strings too).
   const burnIntent: WireBurnIntent = {
-    maxBlockHeight: maxUint256.toString(),
+    maxBlockHeight: maxBlockHeight.toString(),
     maxFee: maxFee.toString(),
     spec: { ...spec, value: valueAtomic.toString() },
   };
   return { burnIntent, signature };
+}
+
+export function withdrawTypedData(intent: WireBurnIntent) {
+  return {
+    domain: ARC.gatewayWalletEip712,
+    types: BURN_INTENT_TYPES,
+    primaryType: "BurnIntent" as const,
+    message: {
+      maxBlockHeight: BigInt(intent.maxBlockHeight),
+      maxFee: BigInt(intent.maxFee),
+      spec: { ...intent.spec, value: BigInt(intent.spec.value) },
+    },
+  };
+}
+export interface WithdrawPolicy {
+  /** Authenticated owner and explicitly approved recipient; same-chain Arc testnet only. */
+  owner: string;
+  recipient: string;
+  maxValueMicros: bigint;
+  maxFeeMicros: bigint;
+  maxBlockHeight: bigint;
+}
+/** Strict shape, canonical padded addresses, signed terms and recovered identity before effects. */
+export async function verifyWithdrawIntent(
+  value: SignedWithdrawIntent,
+  selected: WithdrawPolicy,
+) {
+  const request = structuredClone(value),
+    policy = { ...selected };
+  if (
+    [policy.maxValueMicros, policy.maxFeeMicros, policy.maxBlockHeight].some(
+      (v) => typeof v !== "bigint" || v < 0n || v > maxUint256,
+    )
+  )
+    throw new Error("explicit integer policy bounds required");
+  const b = request?.burnIntent,
+    s = b?.spec;
+  const keys = (v: unknown, wanted: string[]) =>
+    v &&
+    typeof v === "object" &&
+    !Array.isArray(v) &&
+    Object.keys(v).sort().join() === wanted.sort().join();
+  const uint = (v: unknown) =>
+    typeof v === "string" &&
+    /^(0|[1-9][0-9]{0,77})$/.test(v) &&
+    BigInt(v) <= maxUint256;
+  const b32 = (v: unknown) =>
+    typeof v === "string" && /^0x0{24}[0-9a-fA-F]{40}$/.test(v);
+  const hex32 = (v: unknown) =>
+    typeof v === "string" && /^0x[0-9a-fA-F]{64}$/.test(v);
+  if (
+    !keys(request, ["burnIntent", "signature"]) ||
+    !keys(b, ["maxBlockHeight", "maxFee", "spec"]) ||
+    !keys(s, [
+      "version",
+      "sourceDomain",
+      "destinationDomain",
+      "sourceContract",
+      "destinationContract",
+      "sourceToken",
+      "destinationToken",
+      "sourceDepositor",
+      "destinationRecipient",
+      "sourceSigner",
+      "destinationCaller",
+      "value",
+      "salt",
+      "hookData",
+    ]) ||
+    !uint(b.maxBlockHeight) ||
+    BigInt(b.maxBlockHeight) === 0n ||
+    BigInt(b.maxBlockHeight) === maxUint256 ||
+    policy.maxBlockHeight <= 0n ||
+    BigInt(b.maxBlockHeight) > policy.maxBlockHeight ||
+    !uint(b.maxFee) ||
+    !uint(s.value) ||
+    BigInt(s.value) <= 0n ||
+    s.version !== 1 ||
+    s.sourceDomain !== ARC.cctpDomain ||
+    s.destinationDomain !== ARC.cctpDomain ||
+    !hex32(s.salt) ||
+    s.hookData !== "0x" ||
+    !/^0x[0-9a-fA-F]{130}$/.test(request.signature) ||
+    policy.maxValueMicros <= 0n ||
+    policy.maxFeeMicros < 0n ||
+    BigInt(s.value) > policy.maxValueMicros ||
+    BigInt(b.maxFee) > policy.maxFeeMicros
+  )
+    throw new Error("invalid withdrawal terms");
+  const from = getAddress(policy.owner),
+    recipient = getAddress(policy.recipient);
+  if (from === zeroAddress || recipient === zeroAddress)
+    throw new Error("zero owner/recipient");
+  const expected = {
+    sourceContract: ARC.gatewayWallet,
+    destinationContract: ARC.gatewayMinter,
+    sourceToken: ARC.usdc,
+    destinationToken: ARC.usdc,
+    sourceDepositor: from,
+    sourceSigner: from,
+    destinationRecipient: recipient,
+    destinationCaller: zeroAddress,
+  };
+  for (const [k, addr] of Object.entries(expected)) {
+    const actual = s[k as keyof typeof expected];
+    if (!b32(actual) || actual.toLowerCase() !== toBytes32(addr))
+      throw new Error("withdrawal identity mismatch");
+  }
+  const typed = withdrawTypedData(b),
+    signer = await recoverTypedDataAddress({
+      ...typed,
+      signature: request.signature,
+    });
+  if (getAddress(signer) !== from)
+    throw new Error("withdrawal signer mismatch");
+  return {
+    id: hashTypedData(typed),
+    request,
+    owner: from,
+    recipient,
+    amountMicros: s.value,
+  };
 }

@@ -3,24 +3,24 @@
  * toll (fixed or dynamic) in one call. Returns the settlement result, including `transaction`
  * (a Circle Gateway transfer id — NOT an EVM tx hash; see README "On-chain proof").
  */
-import { GatewayClient, type SupportedChainName } from "@circle-fin/x402-batching/client";
+import { GatewayClient } from "@circle-fin/x402-batching/client";
 import { ARC } from "../arc.js";
 
 export interface BuyerOptions {
-  privateKey: `0x${string}`;   // the agent's funded spend wallet
+  privateKey: `0x${string}`; // the agent's funded spend wallet
   rpcUrl?: string;
-  chain?: SupportedChainName;
 }
 
 export function makeBuyer(o: BuyerOptions): GatewayClient {
   return new GatewayClient({
-    chain: o.chain ?? (ARC.viemChainName as SupportedChainName),
+    chain: "arcTestnet",
     privateKey: o.privateKey,
     rpcUrl: o.rpcUrl ?? ARC.rpcUrl,
   });
 }
 
-/** Pay a FIXED-price toll (GET). The seller's 402 challenge dictates the amount. */
+/** Pays the seller challenge from a server-held treasury key, without a budget cap.
+ * Never retry with a new authorization after a missing response. Browser grants do not constrain this SDK buyer. */
 export async function payToll<T = unknown>(buyer: GatewayClient, url: string) {
   return buyer.pay<T>(url);
 }
@@ -30,7 +30,11 @@ export async function payToll<T = unknown>(buyer: GatewayClient, url: string) {
  * contribution-weighted citation reward encoded in the query/body) and returns a matching
  * 402 challenge; GatewayClient.pay authorizes exactly that amount.
  */
-export async function payDynamic<T = unknown>(buyer: GatewayClient, url: string, body?: unknown) {
+export async function payDynamic<T = unknown>(
+  buyer: GatewayClient,
+  url: string,
+  body?: unknown,
+) {
   return buyer.pay<T>(url, { method: "POST", body });
 }
 

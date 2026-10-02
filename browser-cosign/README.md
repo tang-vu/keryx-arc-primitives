@@ -1,31 +1,7 @@
-# Browser co-sign — non-custodial, user-funded agent spend
+# Atomic budget reservations (reference only)
 
-Let an agent spend a user's USDC on Arc **without ever holding the user's key**, with a hard cap.
+`MemoryGrantStore` demonstrates synchronous check-and-reserve using bigint micro-USDC before any await or browser nonce exposure. Consumption stays held after exposure, submission, settlement, expiry and revocation. Only prepared, provably unexposed work can cancel. Grant replacement/signer aliases cannot reset the budget within this store.
 
-## The flow
-```
-1. User funds a session EOA (their own wallet, in the browser tab) + deposits into Circle Gateway.
-2. setGrant(sessionId, capUsdc) on the server  ← the funded amount IS the cap.
-3. Agent wants to pay an x402 toll:
-   server: canSpend(sessionId, amount)?   ← cap check BEFORE any signing
-     └─ false → reject (never ask the browser to sign)
-     └─ true  → emit a sign-request to the browser (SSE/websocket)
-4. Browser's in-tab session key signs the EIP-712 authorization, POSTs it back.
-5. Seller settles on Arc. server: recordSpend(sessionId, amount).
-```
+This is **not durable**: restarting loses all authority, and multiple processes have independent state. Do not use it with live funds. Port the transition contract into an authenticated transactional database with cumulative signer/epoch accounting, durable nonce admission, exact settlement evidence and explicit recovery. The module does not implement browser custody/signing, Circle reconciliation or key expiry, and it does not constrain the server-key SDK buyer.
 
-The private key lives only in the browser tab. The server holds **no** key for the session — it only
-tracks spend and enforces the ceiling. A leaked session key can spend at most the remaining cap,
-within the grant TTL.
-
-## API ([`session-grant.ts`](./session-grant.ts))
-- `setGrant(sessionId, capUsdc, ttlSeconds?)` — activate a grant (call when the user funds).
-- `canSpend(sessionId, amountUsdc)` — **pre-spend guard**; call before asking the browser to sign.
-- `recordSpend(sessionId, amountUsdc)` — call after a successful settle.
-- `isGrantValid` / `remaining` / `revokeGrant` — status + teardown.
-
-In-memory by default — swap the `Map` for Redis/DB to run multiple server instances.
-
-## Why this isn't in `circlefin/arc-*`
-Those repos settle from a server-held key. This is the **non-custodial** counterpart: user-funded,
-browser-signed, server-capped — the safe shape for "an agent spends *my* money, up to $X."
+See [migration](../docs/migration-0.3.md), [host contracts](../docs/provenance.md) and the [offline demo](../examples/offline.ts).

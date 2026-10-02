@@ -1,101 +1,105 @@
-# keryx-arc-primitives
+# Keryx Arc primitives
 
-Reusable, forkable building blocks for **agent + creator-monetization apps on [Arc](https://docs.arc.network)**, extracted from [Keryx](https://keryx.cc) ([repo](https://github.com/tang-vu/keryx)) for the **Arc Open Source Showcase**.
+Small MIT-licensed TypeScript building blocks for citation-toll and creator-payment applications on **Arc testnet**. Fork the code, run the offline checks, then supply your own authenticated application and durable payment journal.
 
-The `circlefin/arc-*` repos (arc-commerce, arc-p2p-payments, …) cover commerce and P2P flows. These primitives add the pieces that weren't there yet: **two-toll x402 settlement, an on-chain creator/attribution registry, non-custodial user-funded agent spend, gasless creator cash-out, and x402 endpoint discovery** — all on Arc testnet, all real USDC settlement.
+Version 0.3 refreshes the original July extraction against [Keryx](https://github.com/tang-vu/keryx/tree/2c59c07) and its pinned Circle SDK 3.5.0. It is a reviewed subset, not the complete Keryx runtime, an audited payment service or a mainnet release. See [provenance and remaining gates](docs/provenance.md).
 
-> MIT-licensed. Built to fork, import, and ship on top of.
+## Run the fork
 
-## What's inside
+Use Node 22.19+ or Node 24+; CI uses Node 24.21.0 and npm 11.19.0.
 
-| Primitive | Folder | What it gives you |
-|---|---|---|
-| **Two-toll x402** | [`x402-two-toll/`](./x402-two-toll) | A `settleThenServe` seller that charges a **fixed** OR a **dynamic** (per-request, computed) USDC toll on one rail, plus a buyer helper. Pattern for pay-per-use **and** pay-per-attribution. Framework-agnostic + a Next.js adapter. |
-| **SourceRegistry** | [`source-registry/`](./source-registry) | A Solidity contract + viem client + a generic event indexer for an on-chain catalog of payable sources: **squat-proof creator-scoped IDs, basis-point multi-author splits, IPFS CID, tags**. Reusable for any attribution/royalty/payout app. |
-| **Browser co-sign** | [`browser-cosign/`](./browser-cosign) | Server-side **spend-cap enforcement** for non-custodial, user-funded agent spend: the user funds a session EOA, the in-tab key co-signs each x402 authorization, and the server caps spend **before** signing. The key never touches the server. |
-| **Gasless cash-out** | [`gasless-cashout/`](./gasless-cashout) | Let a user withdraw their Circle Gateway balance to real on-chain USDC with **no gas and no server-held key**: the wallet signs a burn intent in the browser, a **treasury relayer** submits the permissionless `gatewayMint()` and eats the gas. Returns a real EVM tx hash. |
-| **x402 discovery** | [`x402-discovery/`](./x402-discovery) | Declare **Bazaar discovery metadata** (provider + input/output JSON schemas) so `circle services inspect` and any x402 tooling can read and call your paid endpoint with zero prior knowledge — carried through verify/settle with a **bare-retry fallback** so it can never break the money path. |
-| **Arc constants** | [`arc.ts`](./arc.ts) | The Arc-testnet constants the docs scatter — chain id, USDC, Gateway wallet + minter, RPC, explorer, the 6-vs-18 decimal footgun, and the **undocumented 7-day x402 validity floor** (with the safe value). |
-
-> **Also from Keryx, shipped as a package** — [`keryx-mcp`](https://www.npmjs.com/package/keryx-mcp) on npm: an MCP server that exposes an x402 *ask-with-budget* endpoint as a single agent tool call. A template for making any x402 service callable from an MCP client — that is why it lives as an installable package, not a folder here.
-
-## The two questions Arc OSS asks
-
-**What primitives are you exposing?** Two-toll x402 settlement (fixed + dynamic on one rail), a squat-proof on-chain creator registry with weighted multi-author splits + indexer, a server-enforced spend cap for non-custodial agent spend, a gasless treasury-relayed cash-out, and a self-describing x402 discovery declaration.
-
-**What do you add vs `circlefin/arc-*`?** Those repos show commerce/P2P transfers. These add (1) **dynamic, contribution-weighted** tolls — not just fixed prices; (2) a reusable **attribution registry** (creator→wallet, multi-author bp splits) that nothing in arc-* provides; (3) a **non-custodial user-funded agent** spend pattern with a hard cap, beyond a server holding a key; (4) a **gasless cash-out** where the user signs and a treasury eats the gas — no gas balance, no server-held key; (5) an **x402 discovery** layer so paid endpoints are inspectable and callable with zero prior knowledge.
-
-## Quick start
-
-```bash
-npm i @circle-fin/x402-batching viem
+```sh
+git clone https://github.com/tang-vu/keryx-arc-primitives.git
+cd keryx-arc-primitives
+npx --yes npm@11.19.0 ci
+npm run check
+npm run test:package
 ```
 
-### Charge a toll (fixed or dynamic), settle on Arc
+`npm run demo` makes **no network requests, signs no payments and spends no funds**. It shows an exact reward allocation, atomic budget reservations and a seller's unpaid 402 challenge. All test settlement/receipt responses are synthetic.
+
+`npm run build` generates ESM JavaScript and TypeScript declarations under `dist/`. `npm pack` builds a portable tarball; install that local artifact with `npm install /path/to/keryx-arc-primitives-0.3.0.tgz`. This repository does not claim an npm registry publication. Clone/build/pack before consumption; do not rely on a Git URL install to build ignored `dist/`.
+
+## Primitives
+
+| Export                            | Purpose                                                                                                            | Host responsibility                                                                                                                              |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `amounts`                         | Exact micro-USDC parsing/formatting and largest-remainder weighted allocation                                      | Authoritative amounts, reward evidence and selected recipients                                                                                   |
+| `x402-two-toll/seller`            | Fixed or request-computed tolls; bind payment identity, claim durably, submit once, then deliver                   | Authenticate buyer/request, resolve creator payee/price, implement atomic journal and reconciliation                                             |
+| `x402-two-toll/buyer`             | Testnet Circle SDK client for a **server-held treasury key**                                                       | Validate challenge/payee, cap aggregate spend before signing, persist/recover ambiguous debits; never blindly repeat a missing-response purchase |
+| `source-registry/registry-client` | Creator-bound IDs, contract reads and bounded write encoders                                                       | Establish source ownership separately, read active payout authority, authenticate creator writes                                                 |
+| `source-registry/indexer`         | Ordered block/log delivery with stable deduplication identity                                                      | Durable cursor, idempotent/transactional application, RPC trust and finality policy                                                              |
+| `browser-cosign/session-grant`    | Synchronous integer reservations in a **single-process, in-memory reference**                                      | Durable database transactions, authenticated nonce admission, signer/epoch lifetime accounting, browser signing policy                           |
+| `gasless-cashout/withdraw-intent` | Browser signing and recovered-signature validation of same-chain burn terms                                        | Authenticated owner/recipient, current fee quote, funded availability and finite signing window                                                  |
+| `gasless-cashout/relay`           | Single Circle request, exact attestation binding, gas-capped mint, prepared transaction persisted before broadcast | Durable unique journal, treasury nonce serialization, sponsorship limits, backups and explicit recovery                                          |
+| `x402-discovery/discovery`        | Additive Bazaar metadata                                                                                           | Schema quality and compatibility; metadata never proves a safe settlement retry                                                                  |
+| `arc`                             | Frozen testnet constants, USDC ERC-20 six decimals versus native gas eighteen                                      | Revalidate vendor facts when changing networks or SDKs                                                                                           |
+
+### Fixed and weighted tolls
+
+Use strings at the price boundary and integers everywhere budgets are allocated:
+
 ```ts
-import { settleThenServe } from "./x402-two-toll/seller";
+import {
+  allocateMicros,
+  formatUsdc,
+  parseUsdc,
+} from "keryx-arc-primitives/amounts";
+import { settleThenServe } from "keryx-arc-primitives/x402-two-toll/seller";
 
-// FIXED toll:
-const r = await settleThenServe(paymentSigHeader, { priceUsdc: 0.004, payTo: creatorWallet, resourceUrl: "/api/source/42" }, async (settle) => {
-  return { content: unlockGatedContent(), tx: settle.transaction }; // runs ONLY after settlement
-});
-
-// DYNAMIC toll — compute the price per request (e.g. a weighted citation reward), then:
-const reward = pool * contributionWeight;
-await settleThenServe(paymentSigHeader, { priceUsdc: reward, payTo: authorWallet, resourceUrl: "/api/cite/42" }, () => ({ ok: true }));
+const rewards = allocateMicros(parseUsdc("0.01"), [6000n, 4000n]);
+const options = {
+  priceUsdc: formatUsdc(rewards[0]),
+  payTo: creatorWallet, // selected from authoritative active registry state
+  resourceUrl: canonicalUrl, // host authenticates the exact intended request
+};
+const result = await settleThenServe(
+  paymentSignatureHeader,
+  options,
+  (receipt) => unlockExactPaidVersion(receipt),
+  { journal: durableSellerJournal },
+);
 ```
 
-### Pay a toll (the agent side)
+The journal must uniquely claim `network + asset + payer + nonce` across resources, persist the original request, and acknowledge submission **before** the facilitator is called. Missing storage fails closed. Unknown settlement returns `202 pending`; it does not release the claim or authorize a fresh nonce. A confirmed debit survives producer failure through `PAYMENT-RESPONSE` and `settled-undelivered`. Resource metadata is unsigned: the journal binds its first admitted use; proving the buyer intended a particular product requires a host-issued durable nonce/request policy before signing.
+
+### Browser budget reference
+
 ```ts
-import { makeBuyer, payToll } from "./x402-two-toll/buyer";
-const buyer = makeBuyer({ privateKey: process.env.AGENT_KEY as `0x${string}` });
-const res = await payToll(buyer, "https://host/api/source/42"); // settles real USDC on Arc
+import { MemoryGrantStore } from "keryx-arc-primitives/browser-cosign/session-grant";
+const store = new MemoryGrantStore(); // offline/reference only
+store.setGrant("session", sessionAddress, 10_000n);
+store.reserve("session", admittedIntentId, 4000n); // atomic before any await
+store.expose(admittedIntentId); // before revealing signing terms
+store.submit(admittedIntentId); // before possible settlement
+// Persist exact Circle success evidence first, then:
+store.settle(admittedIntentId);
 ```
 
-### Register a source on-chain (creator-signed, squat-proof)
-```ts
-import { urlHash, buildRegisterArgs } from "./source-registry/registry-client";
-const args = buildRegisterArgs(REGISTRY_ADDRESS, {
-  urlHash: urlHash("https://blog.example.com/feed"), payoutWallet,
-  authors: [{ wallet: a, basisPoints: 6000 }, { wallet: b, basisPoints: 4000 }], // 60/40, must sum to 10_000
-  fetchPriceUsdc6: 4000n, contentCid: "ipfs://…", tags: "ai,x402",
-});
-await walletClient.writeContract(args); // creator's wallet signs + pays gas
-```
+Only `cancelUnexposed` releases a prepared reservation. Expiry and revocation stop new admission and preserve existing consumption. An expired server grant does **not** expire a signed Circle authorization or constrain a stolen key's direct use. Funded balance is a separate economic limit. This example is unsuitable for restart or multiple processes and does not constrain `GatewayClient.pay()`.
 
-### Index registry events
-```ts
-import { syncOnce } from "./source-registry/indexer";
-let from = DEPLOY_BLOCK;
-from = await syncOnce({ address: REGISTRY_ADDRESS, fromBlock: from, onEvent: (e) => db.apply(e) }); // persist `from`
-```
+### Gasless withdrawal
 
-### Gasless cash-out (user signs in the browser, treasury pays gas)
-```ts
-// browser — the connected wallet signs, no gas, no network switch:
-import { buildAndSignWithdrawIntent } from "./gasless-cashout/withdraw-intent";
-const value = availableAtomic - parseUnits("0.005", 6);        // reserve the Circle fee, never sign the whole balance
-const signed = await buildAndSignWithdrawIntent(walletClient, value);
-await fetch("/api/withdraw", { method: "POST", body: JSON.stringify(signed) });
+The browser must receive an explicit fee ceiling and approved recipient; reserve that fee from available funds. `buildAndSignWithdrawIntent(walletClient, valueMicros, { recipient, maxFeeUsdc: quotedCeiling, maxBlockHeight: approvedFiniteHeight })` returns a JSON-safe signed intent. The builder requires an explicit finite source-chain block-height ceiling. Production hosts must persist the draft before signing under a reviewed policy.
 
-// server — treasury relays the mint and eats the gas:
-import { relayGaslessWithdraw } from "./gasless-cashout/relay";
-const { mintTxHash } = await relayGaslessWithdraw({ treasuryKey, ...signed, expectedDepositor: session.address });
-```
+The server calls `relayGaslessWithdraw` with `policy: { owner, recipient, maxValueMicros, maxFeeMicros, maxBlockHeight }`, a required durable `journal`, and `maxGasCostAtomic` in **18-decimal native units**. It recovers the signature before effects, matches the entire returned TransferSpec, simulates mint verification, persists the signed raw transaction/hash, and confirms only that exact successful receipt. A response loss, expiry, gas-cap rejection after Circle submission or replacement receipt stays retained for explicit recovery. See [relay journal contract](gasless-cashout/README.md).
 
-### Make a paid endpoint discoverable (`circle services inspect`-able)
-```ts
-import { bazaarExtension, settleWithDiscoveryFallback } from "./x402-discovery/discovery";
-const body = { x402Version: 2, accepts: [requirements], extensions: bazaarExtension(decl) }; // in the 402 challenge
-const res  = await settleWithDiscoveryFallback(payload, decl, (p) => facilitator.settle(p));  // carried through, bare-retry safe
-```
+## Evidence and scope
 
-## On-chain proof (read before reporting "tx hashes")
+A Circle nanopayment settlement identifier is not automatically an EVM transaction hash. Preserve Circle success/network/payer/amount/nonce evidence; only a verified chain transaction belongs in an explorer `/tx/` link. Neither synthetic tests nor the offline demo prove a funded payment, a deployed registry or mainnet readiness.
 
-Circle's Gateway **batches** many nanopayments into a few on-chain settlements, so `GatewayClient.pay()` returns a Circle **transfer id (UUID)** — *not* a per-payment EVM tx hash. Verifiable proof is the **settlement wallet** + the **registry contract** on [ArcScan](https://testnet.arcscan.app), not a per-payment `/tx/` link. Live reference deployment of `SourceRegistry`: [`0x2e12Fa3256B21b9d8726933b5c4bfBDCc740e536`](https://testnet.arcscan.app/address/0x2e12Fa3256B21b9d8726933b5c4bfBDCc740e536#code) (verified source).
+| Surface                                               | Applicability here                                                                             |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Library/API host                                      | ESM exports, HTTP result adapter, required durable journal interfaces                          |
+| Browser                                               | Burn-intent signing/verification and server budget reference; no packaged worker or wallet UI  |
+| Web, desktop, CLI, remote/stdio MCP, extensions, bots | Products in upstream Keryx; this extraction does not distribute, deploy or synchronize them    |
+| Smart contract                                        | Unchanged `SourceRegistry.sol`; deployment/contract runtime acceptance remains a separate gate |
+| Mainnet                                               | Not supported by these defaults; no activation, funded writes or mainnet proof in this release |
 
-## Status
-Extracted from a live app ([keryx.cc](https://keryx.cc)) settling real USDC on Arc testnet. Testnet-first (KISS): no OpenZeppelin dep, no funds held in the registry. PRs welcome.
+## Arc OSS Showcase pitch
 
-## License
-MIT — see [LICENSE](./LICENSE).
+**What primitives are exposed?** Exact weighted micro-USDC allocation, fixed/dynamic x402 settle-before-delivery, creator-bound registry helpers and ordered indexing, atomic budget reservation examples, browser-signed treasury-relayed withdrawal, and endpoint discovery metadata. The safety contracts keep ambiguous debits retained and require durable admission before effects.
+
+**What do they add alongside Circle's Arc commerce/P2P examples?** Composable patterns for attribution and creator payments: a second computed toll, exact weighted splits, creator-scoped payout metadata, user-funded signing integration boundaries, and recovery-aware withdrawal/settlement interfaces. These are useful additions for builders, without claiming exclusivity or copying a full application.
+
+Read the [0.3 migration guide](docs/migration-0.3.md), [changelog](CHANGELOG.md) and [maintenance policy](docs/provenance.md). MIT; see [LICENSE](LICENSE).
