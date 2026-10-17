@@ -1,6 +1,19 @@
 import { allocateMicros, formatUsdc, parseUsdc } from "../amounts.js";
 import { MemoryGrantStore } from "../browser-cosign/session-grant.js";
 import { settleThenServe } from "../x402-two-toll/seller.js";
+import {
+  checkPaidText,
+  selectPlaintextCommitment,
+} from "../x402-two-toll/paid-content.js";
+const original = Object.freeze({
+  state: "pending",
+  id: "synthetic-payment-original",
+});
+const refusedDelivery = checkPaidText(
+  "wrong article",
+  selectPlaintextCommitment({ plaintextBytes: 1 }),
+  original,
+);
 const creator = "0x1111111111111111111111111111111111111111";
 const pool = parseUsdc("0.000007"),
   splits = allocateMicros(pool, [6000n, 4000n]);
@@ -28,6 +41,10 @@ console.log(
       remaining: formatUsdc(grants.remaining("offline-demo")),
       unpaidHttpStatus: challenge.status,
       exposedReservation: "held until exact recovery evidence",
+      contentMismatch: refusedDelivery.delivered
+        ? "unexpected"
+        : refusedDelivery.reason,
+      paymentOriginalRetained: refusedDelivery.payment === original,
     },
     null,
     2,

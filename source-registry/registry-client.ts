@@ -164,7 +164,7 @@ const ZERO = "0x0000000000000000000000000000000000000000";
 export async function getRegistrySource(
   address: Address,
   id: Hex,
-  rpcUrl = ARC.rpcUrl,
+  rpcUrl: string = ARC.rpcUrl,
 ): Promise<OnChainRecord | null> {
   const client = createPublicClient({
     chain: arcTestnet,

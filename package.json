@@ -1,6 +1,6 @@
 {
   "name": "keryx-arc-primitives",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Reusable, forkable building blocks for agent + creator-monetization apps on Arc: two-toll x402 settlement, an on-chain creator/attribution registry, non-custodial user-funded agent spend, gasless treasury-relayed cash-out, and x402 endpoint discovery.",
   "type": "module",
   "license": "MIT",
@@ -64,6 +64,14 @@
     "./amounts": {
       "types": "./dist/amounts.d.ts",
       "import": "./dist/amounts.js"
+    },
+    "./x402-two-toll/paid-content": {
+      "types": "./dist/x402-two-toll/paid-content.d.ts",
+      "import": "./dist/x402-two-toll/paid-content.js"
+    },
+    "./source-registry/payment-terms": {
+      "types": "./dist/source-registry/payment-terms.d.ts",
+      "import": "./dist/source-registry/payment-terms.js"
     }
   },
   "engines": {
