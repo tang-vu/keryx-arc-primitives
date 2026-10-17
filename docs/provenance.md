@@ -1,5 +1,17 @@
 # Provenance, maintenance and release gates
 
+## 0.4 extraction
+
+Owner-authorized October 17 refresh: add reusable content-integrity and registry-origin protections while preserving the existing testnet payment authority. Inspected upstream source: [Keryx `50ad8e0ebdd65ba35da965dfb3e7ef8b0e6b3ed0`](https://github.com/tang-vu/keryx/tree/50ad8e0ebdd65ba35da965dfb3e7ef8b0e6b3ed0).
+
+- Plaintext commitments: `lib/payments/paid-article-body.ts` and `lib/sources/content-receipt.ts`, introduced/hardened in [October 9 `1d5828ac`](https://github.com/tang-vu/keryx/commit/1d5828ac548849b39723e027e90809de4148eed9). Extract SHA-256/UTF-8 checking and pre-I/O snapshots. Preserve a generic host-owned payment original rather than importing application payment-state classes, databases or reward authority.
+- Registry authority: `lib/payments/browser-original-source-authority.ts` and `lib/registry/source-registry-authority.ts`, including [October 12 `e69bfc96`](https://github.com/tang-vu/keryx/commit/e69bfc967382297d6dba6487e3bb689ca6c9b58a). Preserve explicit deployment origin and active creator-bound payee/price selection in this library's original ABI. Do not copy upstream v2/v3 contracts, onboarding state or mainnet configuration. RPC failure refuses terms; any availability fallback requires a separate host policy.
+- Browser/API hosts can use portable plaintext checking; registry reading uses the existing testnet viem client. Existing seller journals, payment retries, spend caps and withdrawal custody remain unchanged. Web/desktop/CLI/remote and stdio MCP/extensions/bots remain upstream products with independent versions and release authority.
+
+New acceptance covers malformed/conflicting commitments, UTF-8/hash mismatch, retained settled/pending originals, missing/inactive/foreign registry authority, wrong chain, RPC failure, mutation during I/O and exact price bounds. The clean packed consumer imports all exports and exercises the new runtime/types. These are synthetic checks, not funded payment, registry deployment, mainnet or durable recovery acceptance. See [0.4 integration](migration-0.4.md).
+
+## 0.3 baseline
+
 Refresh baseline: standalone `b08106c` (2026-09-19, ignore-file update); its runtime source originated in `b453e3e` (2026-07-05). Reviewed upstream anchor: [Keryx `2c59c07`](https://github.com/tang-vu/keryx/tree/2c59c07). The extraction preserves small reusable interfaces and does not claim source or runtime equivalence with that application.
 
 | Area              | Upstream reference                                                                            | Extraction decision                                                                                                                                                                             |
